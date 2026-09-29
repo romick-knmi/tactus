@@ -218,74 +218,162 @@ candidates = [
 ]
 
 # ------------------------------------------------------------------
-# UWC — United Weather Centres / ECMWF OPLACE convention.
+# UWC — United Weather Centres / ECMWF OPLACE convention (SAPP output).
+#
+# All conventional observations arrive in a single consolidated BUFR
+# file whose name follows one of several site conventions.  ObsPrep
+# tries each candidate template in order and splits the first match
+# into per-type BUFR files using eccodes bufr_filter.
+#
+# Satellite observations are sourced independently via their own
+# candidates lists and are NOT affected by the conv_bufr_source logic.
+#
+# CONSOLIDATED BUFR SPLIT KEYS:
+#   obs_step        = 0   The consolidated file already covers the full
+#                         assimilation window; per-slot windowing is off.
+#   conv_bufr_source      Candidate filename templates, tried in order.
+#                         Placeholders: {ymdrr}, {yyyy}, {mm}, {dd}, {rr}.
+#   conv_bufr_filter      Path to the eccodes filter that splits by
+#                         BUFR category into BUFR.<type> output files.
+#   conv_split_types      Explicit list of obs types produced by the
+#                         filter.  ONLY these types bypass normal
+#                         candidates-based staging.  Must match the
+#                         obstype keys defined below (e.g. [.obstypes.synop]).
+#
+# Adding a new conventional obs type sourced from the split:
+#   1. Add the type to conv_split_types.
+#   2. Add a matching [da.providers.UWC.obstypes.<type>] block with
+#      format = "BUFR" (or local_name if the filter output differs).
+#   3. Add the corresponding write statement to conv_bufr_split.filter.
+#   4. Add the type to da.obs_types_3dvar (or obs_types_surface).
+#   No Python code changes are needed.
 # ------------------------------------------------------------------
 [da.providers.UWC]
-obs_step = 60
+
+# Consolidated BUFR already spans the full DA window; no slot iteration.
+obs_step = 0
+
+# Candidate consolidated conventional BUFR filenames (tried in order).
+# Real-world examples:
+#   ob2025020900                 -> matches "ob{ymdrr}"
+#   BUFR01002025020900.DAT       -> matches "BUFRXXXX{ymdrr}.dat" (case-insensitive FS)
+#   sapp1_BUFR00012025020900.DAT -> matches "XXXXX_BUFRXXXX{ymdrr}.DAT"
+conv_bufr_source = [
+  "ob{ymdrr}",
+  "BUFRXXXX{ymdrr}.dat",
+  "XXXXX_BUFRXXXX{ymdrr}.DAT",
+]
+
+# eccodes filter that splits the consolidated BUFR into per-type files.
+# See conv_bufr_split.filter for the full list of categories handled.
+conv_bufr_filter = "/perm/nlcr/hm_lib/CY49T2h_AROME_3DVAR_2026_05_26/const/eccodes/filters/conv_bufr_split.filter"
+
+# Obs types produced by the split.  Must exactly match the obstype keys
+# below ([da.providers.UWC.obstypes.synop] etc.) and the items in
+# obs_types_3dvar.  Types NOT listed here (amsua, iasi, ascat, seviri, ...)
+# use their own candidates lists and are unaffected by the split.
+conv_split_types = [
+  "synop",
+  "amdar",
+  "temp",
+  "gpssol",
+]
+
+# ------------------------------------------------------------------
+# Conventional obs — produced by conv_bufr split
+# (no candidates needed; filenames must match filter write targets)
+# ------------------------------------------------------------------
 
 [da.providers.UWC.obstypes.synop]
-format     = "OBSOUL"
-candidates = ["obsoul_1_xxxxxx_xx_{ymdrr}"]
+format = "BUFR"
 
-[da.providers.UWC.obstypes.synop_1]
-format     = "OBSOUL"
-candidates = ["obsoul_1_xxxxxy_xx_{ymdrr}"]
-
-[da.providers.UWC.obstypes.amdr]
-format     = "OBSOUL"
-candidates = ["obsoul_2_xxxxxx_xx_{ymdrr}"]
-
-[da.providers.UWC.obstypes.geowind]
-format     = "OBSOUL"
-candidates = ["obsoul_3_xxxxxx_xx_{ymdrr}"]
+[da.providers.UWC.obstypes.amdar]
+# The filter writes aircraft obs to BUFR.amdaromm (AMDAR OMM format).
+local_name = "BUFR.amdaromm"
 
 [da.providers.UWC.obstypes.temp]
-format     = "OBSOUL"
-candidates = ["obsoul_5_xxxxxx_xx_{ymdrr}"]
-
-[da.providers.UWC.obstypes.wp]
-format     = "OBSOUL"
-candidates = ["obsoul_6_xxxxxx_xx_{ymdrr}"]
+format = "BUFR"
 
 [da.providers.UWC.obstypes.gpssol]
-format     = "OBSOUL"
-candidates = ["obsoul_9_xxxxxx_xx_{ymdrr}"]
+format = "BUFR"
+
+# ------------------------------------------------------------------
+# Satellite and independently-sourced obs
+# (normal candidates-based staging; unaffected by conv_bufr_source)
+# ------------------------------------------------------------------
 
 [da.providers.UWC.obstypes.amsua]
 format     = "BUFR"
 candidates = [
-  "bufr_7_amsua_metopc_{ymdrr}",
-  "bufr_7_amsua_metopb_{ymdrr}",
-  "bufr_7_amsua_noaa18_{ymdrr}",
-  "bufr_7_amsua_noaa19_{ymdrr}",
+  "amsua{ymdrr}",
+  "amsua{ymdrr}.bufr",
 ]
 
 [da.providers.UWC.obstypes.amsub]
 format     = "BUFR"
 candidates = [
-  "bufr_7_mhs_metopc_{ymdrr}",
-  "bufr_7_mhs_metopb_{ymdrr}",
-  "bufr_7_mhs_noaa19_{ymdrr}",
-]
-
-[da.providers.UWC.obstypes.seviri]
-obs_step   = 0
-format     = "NETCDF"
-candidates = ["netcdf_7_seviri_xx_{ymdrr}"]
-
-[da.providers.UWC.obstypes.iasi]
-format     = "BUFR"
-candidates = [
-  "bufr_7_iasi_metopb_{ymdrr}",
-  "bufr_7_iasi_metopc_{ymdrr}",
+  "amsub{ymdrr}",
+  "amsub{ymdrr}.bufr",
 ]
 
 [da.providers.UWC.obstypes.ascat]
 format     = "BUFR"
 candidates = [
-  "bufr_9_ascatC_metopb_{ymdrr}",
-  "bufr_9_ascatC_metopc_{ymdrr}",
+  "ascat{ymdrr}",
+  "ascat{ymdrr}.bufr",
 ]
+
+[da.providers.UWC.obstypes.atms]
+format     = "BUFR"
+candidates = [
+  "atms{ymdrr}",
+  "atms{ymdrr}.bufr",
+]
+
+[da.providers.UWC.obstypes.cris]
+format     = "BUFR"
+candidates = [
+  "cris{ymdrr}",
+  "cris{ymdrr}.bufr",
+]
+
+[da.providers.UWC.obstypes.geowind]
+format     = "BUFR"
+candidates = [
+  "geow{ymdrr}",
+  "geow{ymdrr}.bufr",
+]
+
+[da.providers.UWC.obstypes.iasi]
+format     = "BUFR"
+candidates = [
+  "iasi{ymdrr}",
+  "iasi{ymdrr}.bufr",
+]
+
+[da.providers.UWC.obstypes.mwhs]
+format     = "BUFR"
+candidates = [
+  "mwhs{ymdrr}",
+  "mwhs{ymdrr}.bufr",
+]
+
+[da.providers.UWC.obstypes.seviri]
+format     = "NETCDF"
+candidates = ["{ymdrr}_00_seviri.nc"]
+
+[da.providers.UWC.obstypes.modes]
+format     = "BUFR"
+candidates = [
+  "Mode-S_EMADDC_KNMI_oper_{ymdrr}.bufr",
+  "modes{ymdrr}.bufr",
+]
+
+# Unknown
+# GPS
+#-rw-r----- 1 nlcr accord    121730 Feb  9  2025 GPS2025020900
+# mwts
+#-rw-r----- 1 nlcr accord         0 Feb  9  2025 mwts2025020900
 
 # ------------------------------------------------------------------
 # RMI — Royal Meteorological Institute of Belgium.

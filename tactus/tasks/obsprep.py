@@ -30,13 +30,41 @@ searches each slot's date directory.
 Example: basetime 00 UTC, window_shift=-90 min, window_len=180 min →
 slots 23, 00, 01 should be searched (three different hours, possibly across
 two calendar dates).
+
+Consolidated conventional BUFR splitting (UWC / SAPP mode)
+-----------------------------------------------------------
+Some providers (e.g. UWC) deliver all conventional observations in a
+single BUFR file that must be split per observation type using the
+``bufr_filter`` tool from eccodes.  This mode is activated by setting the
+following keys in the provider block::
+
+    [da.providers.UWC]
+    obs_step = 0           # consolidated file already covers full window
+    conv_bufr_source = [   # candidate consolidated filenames, tried in order
+        "ob{ymdrr}",
+        "BUFRXXXX{ymdrr}.dat",
+    ]
+    conv_bufr_filter = "/path/to/conv_bufr_split.filter"
+    conv_split_types = ["synop", "amdar", "temp", "gpssol"]
+
+Obs types listed in ``conv_split_types`` bypass normal candidate collection
+and are sourced exclusively from the split output, whose filenames are
+taken from the obstype's ``format``/``local_name``.  Types NOT in that list
+(satellites, radar, etc.) continue to use their own ``candidates``.
+
+The split runs once per cycle.  Stale outputs from a previous run are
+removed first and empty placeholders created for all expected outputs;
+``bufr_filter`` overwrites those it has data for.  Only non-empty split
+outputs count as available obs types.
 """
+import contextlib
 import datetime as dt
 import os
 import shutil
 import subprocess
 import tempfile
 from collections.abc import Mapping
+from pathlib import Path
 
 from ..datetime_utils import as_datetime
 from ..logs import logger
@@ -97,13 +125,35 @@ class ObsPrep(Task):
         # for backward compatibility, then to 0 (windowing disabled).
         self.obs_step = self._provider.get("obs_step", config.get("da.obs_step", 0))
 
+        # Consolidated conventional BUFR split (only active when the provider
+        # sets conv_bufr_source; empty list = feature disabled).
+        self.conv_bufr_sources = [
+            self.platform.substitute(s)
+            for s in self._provider.get("conv_bufr_source", [])
+        ]
+        self.conv_bufr_filter = self.platform.substitute(
+            self._provider.get("conv_bufr_filter", "")
+        )
+        # Explicit list: satellite types also use BUFR.<type> names but are
+        # sourced independently, so outputs must not be inferred.
+        self.conv_split_types = set(self._provider.get("conv_split_types", []))
+        if self.conv_bufr_sources and self.obs_step != 0:
+            logger.warning(
+                "ObsPrep: provider '{}' sets conv_bufr_source but obs_step={} != 0. "
+                "The consolidated BUFR is assumed to cover the full assimilation "
+                "window already; set obs_step = 0 in the provider block.",
+                self.obs_provider, self.obs_step,
+            )
+
         self.obsoul_merge_script = self.platform.substitute(
             config.get("da.obsoul_merge_script", "")
         )
 
         logger.debug(
-            "Constructed ObsPrep for family={} obs_provider={} obs_step={}min",
+            "Constructed ObsPrep for family={} obs_provider={} obs_step={}min "
+            "conv_split_types={}",
             self.family, self.obs_provider, self.obs_step,
+            sorted(self.conv_split_types) if self.conv_split_types else "none",
         )
 
     def execute(self):
@@ -119,6 +169,10 @@ class ObsPrep(Task):
         dd = self.basetime.strftime("%d")
         rr = self.basetime.strftime("%H")
         ymdrr = f"{yyyy}{mm}{dd}{rr}"
+
+        # Split first so _stage_obstype finds the per-type outputs in the wdir.
+        if self.conv_bufr_sources:
+            self._run_conv_bufr_split(ymdrr)
 
         available_types = []
 
@@ -156,6 +210,125 @@ class ObsPrep(Task):
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _local_name(obstype, spec):
+        """Return the staged filename for *obstype*: ``<format>.<obstype>``.
+
+        Falls back to an explicit ``local_name`` when no ``format`` is given,
+        for outputs that do not follow the convention (e.g. BUFR.amdaromm).
+        """
+        fmt = spec.get("format", "")
+        return f"{fmt}.{obstype}" if fmt else spec.get("local_name", obstype)
+
+    def _run_conv_bufr_split(self, ymdrr):
+        """Split the consolidated conventional BUFR into per-type BUFR files.
+
+        1. Try each ``conv_bufr_source`` template in order (plain or ``.gz``),
+           stopping at the first match.
+        2. Remove stale outputs of the ``conv_split_types`` obs types, then
+           create empty placeholders for them.
+        3. Run ``bufr_filter <conv_bufr_filter> <consolidated>`` once and warn
+           about BUFR categories the filter writes to ``other``.
+
+        Missing inputs or tools are logged as warnings; the split types are
+        then simply reported as absent by ``_stage_obstype``.
+
+        Args:
+            ymdrr (str): Base-time stamp ``YYYYMMDDHH``.
+        """
+        yyyy, mm, dd, rr = ymdrr[:4], ymdrr[4:6], ymdrr[6:8], ymdrr[8:10]
+        subst = {"ymdrr": ymdrr, "yyyy": yyyy, "mm": mm, "dd": dd, "rr": rr}
+        date_dir = os.path.join(self.obs_dir, yyyy, mm, dd)
+        if os.path.isdir(date_dir):
+            logger.debug(
+                "ObsPrep: obs date directory '{}' contains: {}",
+                date_dir, sorted(os.listdir(date_dir)),
+            )
+        else:
+            logger.warning("ObsPrep: obs date directory '{}' does not exist", date_dir)
+
+        consolidated_path = consolidated_name = None
+        is_tmp = False
+        for source_tpl in self.conv_bufr_sources:
+            source_name = source_tpl.format(**subst)
+            path, tmp_flag = self._collect_file(os.path.join(date_dir, source_name))
+            if path is not None:
+                consolidated_path, consolidated_name, is_tmp = path, source_name, tmp_flag
+                logger.debug(
+                    "ObsPrep: found consolidated BUFR '{}' for {}", source_name, ymdrr
+                )
+                break
+
+        # Stale outputs from an earlier run must not pass as this cycle's obs.
+        expected_outputs = set()
+        for obstype in self.conv_split_types:
+            spec = self._obstypes.get(obstype)
+            if isinstance(spec, Mapping):
+                expected_outputs.add(self._local_name(obstype, spec))
+        for fname in expected_outputs:
+            _safe_unlink(fname)
+            Path(fname).touch()
+
+        if consolidated_path is None:
+            logger.warning(
+                "ObsPrep: no consolidated conventional BUFR found for {} "
+                "(tried: {}). All conv-split obs types will be absent.",
+                ymdrr, [tpl.format(**subst) for tpl in self.conv_bufr_sources],
+            )
+            return
+
+        problem = None
+        bufr_filter = shutil.which("bufr_filter")
+        if not self.conv_bufr_filter:
+            problem = f"conv_bufr_filter is not set for provider '{self.obs_provider}'"
+        elif not os.path.isfile(self.conv_bufr_filter):
+            problem = f"conv_bufr_filter '{self.conv_bufr_filter}' does not exist"
+        elif bufr_filter is None:
+            problem = "'bufr_filter' executable not found in PATH"
+        if problem:
+            logger.warning(
+                "ObsPrep: {}; cannot split '{}'. All conv-split obs types will be "
+                "absent.",
+                problem, consolidated_name,
+            )
+            if is_tmp:
+                _safe_unlink(consolidated_path)
+            return
+
+        try:
+            result = subprocess.run(
+                [bufr_filter, self.conv_bufr_filter, consolidated_path],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        finally:
+            if is_tmp:
+                _safe_unlink(consolidated_path)
+
+        if result.returncode != 0:
+            logger.warning(
+                "ObsPrep: bufr_filter failed for '{}' (rc={}): {}",
+                consolidated_name, result.returncode, result.stderr.strip(),
+            )
+            return
+
+        logger.info(
+            "ObsPrep: split consolidated BUFR '{}' using filter '{}'",
+            consolidated_name, self.conv_bufr_filter,
+        )
+        # The filter's default branch reports unhandled categories as
+        # "bufrCategory=N written to other"; surface those to the operator.
+        for raw_line in result.stdout.splitlines():
+            line = raw_line.strip()
+            if "written to other" in line:
+                logger.warning(
+                    "ObsPrep: unrecognised BUFR category in '{}': {}",
+                    consolidated_name, line,
+                )
+            elif line:
+                logger.debug("ObsPrep: bufr_filter: {}", line)
 
     def _window_slots(self, obs_step=None):
         """Return list of datetimes covering the assimilation window.
@@ -211,9 +384,14 @@ class ObsPrep(Task):
         if not isinstance(spec, Mapping):
             return False
 
+        local_name = self._local_name(obstype, spec)
+
+        # Conv-split types were produced (or left as empty placeholders) by
+        # _run_conv_bufr_split; no candidate search for them.
+        if obstype in self.conv_split_types:
+            return self._split_output_available(obstype, local_name)
+
         candidates = spec.get("candidates", [])
-        fmt = spec.get("format", "")
-        local_name = f"{fmt}.{obstype}" if fmt else spec.get("local_name", obstype)
         if not candidates:
             return False
 
@@ -262,6 +440,28 @@ class ObsPrep(Task):
                     except OSError:
                         pass
 
+        return True
+
+    @staticmethod
+    def _split_output_available(obstype, local_name):
+        """Return True when the conv split produced a non-empty *local_name*."""
+        if not os.path.isfile(local_name):
+            logger.warning(
+                "ObsPrep: expected split output '{}' not found for type '{}' "
+                "— is conv_bufr_source configured?",
+                local_name, obstype,
+            )
+            return False
+        if os.path.getsize(local_name) == 0:
+            logger.info(
+                "ObsPrep: '{}' -> '{}' is empty after conv split "
+                "(type absent from consolidated BUFR this cycle).",
+                obstype, local_name,
+            )
+            return False
+        logger.debug(
+            "ObsPrep: using split BUFR '{}' for type '{}'", local_name, obstype
+        )
         return True
 
     def _collect_file(self, src, obstype=None):
@@ -364,3 +564,9 @@ class ObsPrep(Task):
                     "using first file only.",
                     len(paths), fmt, obstype,
                 )
+
+
+def _safe_unlink(path):
+    """Delete *path*, ignoring errors (e.g. it does not exist)."""
+    with contextlib.suppress(OSError):
+        os.unlink(path)
