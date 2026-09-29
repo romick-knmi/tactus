@@ -31,7 +31,7 @@ class OdbMerge(Task):
         self.basetime = as_datetime(config["general.times.basetime"])
         self.da_scratch = self.platform.substitute(config["da.scratch"])
         # family1 determines output archive subdirectory name
-        self.family1 = os.environ.get("DA_STREAM", "3dvar")
+        self.family1 = config.get("task.args.da_stream", "3dvar")
         if self.family1 == "surface":
             self.nbpool = config.get("da.nbpool", 16)
         else:

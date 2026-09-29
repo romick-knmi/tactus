@@ -47,7 +47,7 @@ from .base import Task
 class ObsPrep(Task):
     """Observation-preparation task.
 
-    Supported families (set via the *DA_STREAM* environment variable):
+    Supported families (set via the *da_stream* task argument):
     - ``surface`` stages only surface (SYNOP) observations for CANARI.
     - ``3dvar``   stages all configured obs types for 3D-Var.
     """
@@ -69,7 +69,7 @@ class ObsPrep(Task):
         self.basetime = as_datetime(config["general.times.basetime"])
         self.obs_dir = self.platform.substitute(config["da.obs_dir"])
         self.da_scratch = self.platform.substitute(config["da.scratch"])
-        self.family = os.environ.get("DA_STREAM", "surface")
+        self.family = config.get("task.args.da_stream", "surface")
 
         if self.family == "surface":
             self.obs_types = config.get("da.obs_types_surface", self.DEFAULT_OBS_SURFACE)

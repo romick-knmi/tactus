@@ -71,6 +71,10 @@ assimilation_input_definition = "@CYCLE@/assimilation.json"
   # Enable OpenMP threading in MASTERODB screening step
   openmp = true
 
+  # Run the upper-air 3D-Var chain after the surface OI chain
+  # (tactus default is false; see "Surface-only DA mode" below)
+  upper_air = true
+
   odb_task_surface = "Obsconvert"   # default, can be "Bator"
   odb_task_3dvar   = "Obsconvert"        # default, can be "Obsconvert"
 
@@ -388,12 +392,12 @@ obs_step = 60
 # ------------------------------------------------------------------
 # Surface-only DA mode
 # ------------------------------------------------------------------
-# By default both surface OI (CANARI) and upper-air 3D-Var (OOVAR) are run.
-# Set da.do_upper_air = false to run the surface chain only (CANARI +
+# This file runs both surface OI (CANARI) and upper-air 3D-Var (OOVAR).
+# Set da.upper_air = false to run the surface chain only (CANARI +
 # BlendSur) without the UpperAir family.  Useful for refining the CANARI
 # chain independently or for surface-analysis-only experiments.
 #
-# do_upper_air = false
+# upper_air = false
 
 # ------------------------------------------------------------------
 # OOPS-based 3D-Var (upper-air analysis via OOVAR)

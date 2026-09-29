@@ -31,13 +31,13 @@ class OdbIngestionTask(Task):
         self.da_scratch = self.platform.substitute(config["da.scratch"])
         self.da_const_dir = self.platform.substitute(config["da.const_dir"])
         self.domain = config["domain.name"]
-        self.obstype = os.environ.get("OBSTYPE", "")
+        self.obstype = config.get("task.args.obstype", "")
         if not self.obstype:
             raise RuntimeError(
-                f"{self._LOG_TAG}: OBSTYPE ecFlow variable is not set. "
+                f"{self._LOG_TAG}: task.args.obstype variable is not set. "
                 "It must be set by the OdbFamily suite component."
             )
-        self.family1 = os.environ.get("DA_STREAM", "3dvar")
+        self.family1 = config.get("task.args.da_stream", "3dvar")
         if self.family1 == "surface":
             self.nbpool = config.get("da.nbpool", 16)
         else:
